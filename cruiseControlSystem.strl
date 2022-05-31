@@ -1,0 +1,231 @@
+module CruiseControlSystem:
+
+%Inputs
+input On;
+input Off;
+input Resume;
+input Set;
+input QuickAccel;
+input QuickDecel;
+input Accel : float;
+input Brake : float;
+input Speed : float;
+
+%Outputs
+output CruiseSpeed : float;
+output ThrottleCmd : float;
+output CruiseState : integer; 
+
+%Internal Signals
+signal SpeedBetweenLimit in
+signal AccelPressed in
+signal BrakePressed in
+
+run PedalCheckModule
+||
+run CheckSpeedLimitModule
+||
+run CruiseStateManagementModule
+||
+run CarDrivingControlModule
+||
+run CruiseSpeedManagementModule
+
+
+end signal;
+end signal;
+end signal;
+end module
+
+% This Module checks the accel & brake are pressed or not
+module PedalCheckModule:
+
+input Accel : float;
+input Brake : float;
+output AccelPressed;
+output BrakePressed;
+constant PedalMin = 3.0f : float;
+
+loop
+    await tick;
+    if (?Accel > PedalMin) then
+        emit AccelPressed;
+    end if;
+    if (?Brake > PedalMin) then
+        emit BrakePressed;
+    end if;
+end loop;
+
+end module
+
+% This Module checks the speed is between SpeedMin and SpeedMax or not 
+module CheckSpeedLimitModule:
+
+constant SpeedMin = 30.0f : float;
+constant SpeedMax = 150.0f : float;
+input Speed: float;
+output SpeedBetweenLimit;
+
+loop
+	await tick;
+	if ((?Speed < SpeedMax) and (?Speed > SpeedMin)) then
+		emit SpeedBetweenLimit;
+	end if;
+end loop
+end module
+
+
+% This Module determine the state of Cruise Control system
+module CruiseStateManagementModule:                                                                                                                                                                                     
+
+%Inputs
+input On;
+input Off;
+input Resume;
+input AccelPressed;
+input BrakePressed;
+input SpeedBetweenLimit;
+
+%Outputs CruiseState - 1 = OFF; 2 = ON; 3 = STDBY; 4 = DISABLE;
+output CruiseState : integer; 
+
+var state := 1 : integer in
+loop
+    emit CruiseState(state);
+    await tick;
+    if state = 1 then
+        present (On and not(Off) and SpeedBetweenLimit) then
+            state := 2;            
+        end present;
+
+    elsif state = 2 then
+        present Off then
+            state := 1;
+        end present;
+        present (BrakePressed and not(Off)) then
+            state := 3;
+        end present;
+        present ((AccelPressed or not(SpeedBetweenLimit)) and not(Off)) then
+            state := 4;
+        end present;
+
+    elsif state = 3 then
+        present Off then
+            state := 1;
+        end present;
+        present Resume and (SpeedBetweenLimit and not(BrakePressed) and not(AccelPressed) and not(Off)) then
+            state := 2;
+        end present;
+        present Resume and (not(SpeedBetweenLimit) or AccelPressed) and not(Off) then
+            state := 4;
+        end present;
+
+    elsif state = 4 then
+        present Off then
+            state := 1;
+        end present;
+        present (not(AccelPressed) and SpeedBetweenLimit and not(Off)) then
+            state := 2;
+        end present;
+        present (BrakePressed and not(Off)) then
+            state := 3;
+        end present;
+    end if;
+
+end loop;
+end var;
+end module
+
+% This Module regulates the throttle
+module CarDrivingControlModule:
+%Inputs
+input CruiseState : integer;
+input CruiseSpeed : float;
+input Accel : float;
+input Speed : float;
+
+output ThrottleCmd : float;
+
+function regulateThrottle(boolean, float, float) : float;
+
+loop
+    await tick;
+    % Cruise Control System's state is changed from OFF to ON
+    if (?CruiseState = 2 and pre(?CruiseState) = 1) then
+        emit ThrottleCmd(regulateThrottle(true, ?CruiseSpeed, ?Speed))
+    % Cruise Control System is ON
+    elsif (?CruiseState = 2) then
+        emit ThrottleCmd(regulateThrottle(false , ?CruiseSpeed, ?Speed))
+    % Cruise Control System is OFF
+    else
+        emit ThrottleCmd(?Accel)
+    end if;
+end loop;
+end module
+
+
+% This Module manages the speed of cruise contorl system
+module CruiseSpeedManagementModule:
+
+%Inputs
+input CruiseState : integer;
+input QuickAccel;
+input QuickDecel;
+input Set;
+input Speed : float;
+
+%Outputs
+output CruiseSpeed : float;
+
+constant SpeedMin = 30.0f : float;
+constant SpeedMax = 150.0f : float;
+constant SpeedInc = 2.5f : float;
+
+var CurrentSpeed := 0.0f : float in
+loop
+    emit CruiseSpeed(CurrentSpeed);
+    await tick;
+    
+    % If the Cruise Control is OFF
+    if (?CruiseState  = 1) then
+        CurrentSpeed := 0.0f;
+    else
+    	% Cruise Control System's state is changed from OFF to ON
+        if (?CruiseState = 2 and pre(?CruiseState) = 1) then
+            CurrentSpeed := ?Speed;
+        end if;
+               		
+        present Set then
+          if (?Speed > SpeedMax) then
+                CurrentSpeed := SpeedMax;
+          end if;
+          if (?Speed  < SpeedMin) then
+                CurrentSpeed := SpeedMin;
+          end if;
+          if (SpeedMin <= ?Speed  and  ?Speed <= SpeedMax) then
+                CurrentSpeed := ?Speed;
+          end if;
+        end present;
+        
+        present (QuickAccel and not(Set)) then
+            if (CurrentSpeed + SpeedInc < SpeedMax) then
+                CurrentSpeed := CurrentSpeed + SpeedInc;
+            else
+                CurrentSpeed := SpeedMax;
+            end if;
+        end present;
+        
+        present (QuickDecel and not(Set)) then
+            if (CurrentSpeed - SpeedInc > SpeedMin) then
+                CurrentSpeed := CurrentSpeed - SpeedInc;
+            else
+                CurrentSpeed := SpeedMin;
+            end if;
+        end present;
+
+    end if;
+
+end loop;
+end var;
+end module
+
